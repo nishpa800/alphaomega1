@@ -1,0 +1,1266 @@
+//@version=5
+// --- Added "ZOO-ANY" as a separate plot ---
+// --- Added Dedicated Alerts for all Zoolander Bottom types ---
+indicator("Signal Hub: KC, LSMA, Boolander", shorttitle="HUBall1028_FIXED_v2_Alerts", overlay=true, max_labels_count=500, max_bars_back=5000)
+
+// =============================================================================
+// =============================================================================
+// (A) FUNCTIONS, UDTS, AND HELPERS
+// =============================================================================
+// =============================================================================
+// These are primarily required for the Boolander integration.
+
+// -----------------------------------------------------------------------------
+// A.1) Helpers
+// -----------------------------------------------------------------------------
+// Safety layer: safe_div. Guard divide-by-zero.
+safe_div(float n, float d, float eps = 1e-10) =>
+    // Replicating behavior similar to how Pine handles some internal divisions.
+    d == 0 ? 0.0 : n / (d == 0 ? eps : d)
+
+// -----------------------------------------------------------------------------
+// A.2) UDT DEFINITIONS (Boolander/BelugaCore)
+// -----------------------------------------------------------------------------
+type level
+    int indx
+    float upper
+    float lower
+    float mid
+    float vol
+    bool approached
+    // --- Drawing IDs (Kept for structural parity, visualization disabled in functions) ---
+    line upper_line
+    line lower_line
+    line mid_line
+    linefill fill
+    line approach_line
+
+// -----------------------------------------------------------------------------
+// A.3) FUNCTIONS (Boolander/BelugaCore)
+// -----------------------------------------------------------------------------
+
+f_dema(src, len) =>
+    _ema1 = ta.ema(src, len)
+    _ema2 = ta.ema(_ema1, len)
+    2 * _ema1 - _ema2
+f_tema(src, len) =>
+    _ema1 = ta.ema(src, len)
+    _ema2 = ta.ema(_ema1, len)
+    _ema3 = ta.ema(_ema2, len)
+    3 * (_ema1 - _ema2) + _ema3
+
+// f_base_ma kept for O3 parity.
+f_base_ma(src, len, type) =>
+    switch type
+        "SMA" => ta.sma(src, len)
+        "EMA" => ta.ema(src, len)
+        "VWMA" => ta.vwma(src, len)
+        "LSMA" => ta.linreg(src, len, 0)
+        => ta.sma(src, len)
+
+// f_pbj_ma kept for O3 parity.
+f_pbj_ma(type, src, len) =>
+    result = 0.0
+    if type == "SMA"
+        result := ta.sma(src, len)
+    else if type == "EMA"
+        result := ta.ema(src, len)
+    else if type == "LSMA"
+        result := ta.linreg(src, len, 0)
+    result
+
+f_delete_level_drawings(level lvl) =>
+    // Lines/Fills disabled in the Hub. Keep deletion calls for execution path parity.
+    line.delete(lvl.upper_line)
+    line.delete(lvl.lower_line)
+    line.delete(lvl.mid_line)
+    linefill.delete(lvl.fill)
+    line.delete(lvl.approach_line)
+
+// Modified to disable visualization (color=na).
+// HUB: Added approach_pct parameter for clarity and purity.
+f_create_flipped_pb(bool is_new_pb_bullish, level source_level, array<level> target_array, color block_color, float approach_pct) =>
+    int index = bar_index
+    float upper_price = source_level.upper
+    float lower_price = source_level.lower
+    float mid = source_level.mid
+    float vol_sum = volume
+    approach_price = is_new_pb_bullish ? upper_price * (1 + approach_pct / 100) : lower_price * (1 - approach_pct / 100)
+
+    // Drawing disabled (color=na).
+    line u_line = line.new(index, upper_price, bar_index, upper_price, color=na)
+    line l_line = line.new(index, lower_price, bar_index, lower_price, color=na)
+    line m_line = line.new(index, mid, bar_index, mid, color=na)
+    linefill l_fill = linefill.new(u_line, l_line, na)
+    line a_line = line.new(index, approach_price, bar_index, approach_price, color=na)
+    lvl = level.new(index, upper_price, lower_price, mid, vol_sum, false, u_line, l_line, m_line, l_fill, a_line)
+    array.push(target_array, lvl)
+
+// HUB: Added approach_pct parameter. Added robustness checks for array bounds during merging.
+f_manage_levels(array<level> levels_array, bool is_bullish, array<level> new_support_array, array<level> new_resistance_array, bool enable_broken_pb, color broken_bull_col, color broken_bear_col, float atr_val, float approach_pct) =>
+    bool broken_flag = false
+    bool approach_flag = false
+    bool bounce_flag = false
+    // Arrays: guard get/set with bounds.
+    if array.size(levels_array) > 0
+        // Loop backward to allow safe removal
+        for i = array.size(levels_array) - 1 to 0
+            // Robustness: Check bounds again in case of shifts
+            if i >= array.size(levels_array)
+                continue
+            l = array.get(levels_array, i)
+
+            // Break detection must match original (using close).
+            if is_bullish and close < l.lower // Support PB broken
+                broken_flag := true
+                if enable_broken_pb
+                    f_create_flipped_pb(false, l, new_resistance_array, broken_bear_col, approach_pct)
+                f_delete_level_drawings(l)
+                array.remove(levels_array, i)
+                continue
+
+            if not is_bullish and close > l.upper // Resistance PB broken
+                broken_flag := true
+                if enable_broken_pb
+                    f_create_flipped_pb(true, l, new_support_array, broken_bull_col, approach_pct)
+                f_delete_level_drawings(l)
+                array.remove(levels_array, i)
+                continue
+
+            // Approach/Bounce logic (Required for Beluga PB Buy)
+            approach_price_bull = l.upper * (1 + approach_pct / 100)
+            approach_price_bear = l.lower * (1 - approach_pct / 100)
+            if is_bullish
+                if not l.approached and low <= approach_price_bull
+                    approach_flag := true
+                    l.approached := true
+                else if l.approached and low > l.upper
+                    bounce_flag := true
+                    l.approached := false
+            else
+                if not l.approached and high >= approach_price_bear
+                    approach_flag := true
+                    l.approached := true
+                else if l.approached and high < l.lower
+                    bounce_flag := true
+                    l.approached := false
+
+            // Level merging logic
+            // Robustness check: Ensure i > 0 and the indices are still valid before accessing i-1.
+            if i > 0
+                // Check bounds again as array size might have changed
+                if i >= array.size(levels_array) or i - 1 >= array.size(levels_array)
+                    continue
+                
+                // Re-fetch l and l1 to ensure we have the current state if modifications occurred.
+                l := array.get(levels_array, i)
+                l1 = array.get(levels_array, i - 1)
+                
+                if math.abs(l.mid - l1.mid) < atr_val * 3
+                    if l.vol > l1.vol
+                        f_delete_level_drawings(l1)
+                        array.remove(levels_array, i - 1)
+                    else
+                        f_delete_level_drawings(l)
+                        array.remove(levels_array, i)
+                    // Continue after modification
+                    continue
+    // Returns a 3-tuple.
+    [broken_flag, approach_flag, bounce_flag]
+
+// Modified to disable visualization (color=na).
+// HUB: Added approach_pct parameter. Added boundary checks for lookbacks.
+f_identify_pb(bool is_bullish, bool cross_event, int length_val, array<level> levels_array, color block_color, float highest_val, float lowest_val, float atr_val, float approach_pct) =>
+    int offset = 0
+    float atr1_local = atr_val * 2
+    if cross_event
+        for i = 1 to length_val
+            // Robustness check: Ensure index i is valid for lookback
+            if bar_index - i < 0
+                break
+
+            is_extreme_bar = is_bullish ? low[i] == lowest_val : high[i] == highest_val
+            if is_extreme_bar
+                index = bar_index - i
+                offset := i
+                vol_sum = 0.0
+                for k = 0 to i
+                    // Robustness check: Ensure index k is valid for lookback
+                    if bar_index - k >= 0
+                        vol_sum += volume[k]
+                upper_price = 0.0, lower_price = 0.0
+                if is_bullish
+                    upper_price := math.min(open[i], close[i])
+                    lower_price := lowest_val
+                    if (upper_price - lower_price) < atr1_local * 0.5
+                        upper_price := lower_price + atr1_local * 0.5
+                else
+                    upper_price := highest_val
+                    lower_price := math.max(open[i], close[i])
+                    if (upper_price - lower_price) < atr1_local * 0.5
+                        lower_price := upper_price - atr1_local * 0.5
+                mid = math.avg(upper_price, lower_price)
+                approach_price = is_bullish ? upper_price * (1 + approach_pct / 100) : lower_price * (1 - approach_pct / 100)
+
+                // Drawing disabled (color=na).
+                line u_line = line.new(index, upper_price, bar_index, upper_price, color=na)
+                line l_line = line.new(index, lower_price, bar_index, lower_price, color=na)
+                line m_line = line.new(index, mid, bar_index, mid, color=na)
+                linefill l_fill = linefill.new(u_line, l_line, na)
+                line a_line = line.new(index, approach_price, bar_index, approach_price, color=na)
+                l = level.new(index, upper_price, lower_price, mid, vol_sum, false, u_line, l_line, m_line, l_fill, a_line)
+                array.push(levels_array, l)
+                break
+    offset
+
+// Modified to disable visualization (color=na).
+// HUB: Added approach_pct parameter. Added boundary check.
+f_identify_lander_pb(bool is_bullish, bool cross_event, array<level> levels_array, color block_color, float atr_val, float approach_pct) =>
+    // Robustness check: Ensure lookback index 1 is valid
+    if cross_event and bar_index > 0
+        int index = bar_index - 1
+        int offset = 1
+        float atr_local = atr_val * 2
+        float upper_price = 0.0
+        float lower_price = 0.0
+
+        if is_bullish
+            upper_price := math.max(open[offset], close[offset])
+            lower_price := low[offset]
+            if (upper_price - lower_price) < atr_local * 0.5
+                upper_price := lower_price + atr_local * 0.5
+        else // is resistance
+            upper_price := high[offset]
+            lower_price := math.min(open[offset], close[offset])
+            if (upper_price - lower_price) < atr_local * 0.5
+                lower_price := upper_price - atr_local * 0.5
+
+        float mid = math.avg(upper_price, lower_price)
+        float vol_sum = volume[offset]
+
+        approach_price = is_bullish ? upper_price * (1 + approach_pct / 100) : lower_price * (1 - approach_pct / 100)
+
+        // Drawing disabled (color=na).
+        line u_line = line.new(index, upper_price, bar_index, upper_price, color=na)
+        line l_line = line.new(index, lower_price, bar_index, lower_price, color=na)
+        line m_line = line.new(index, mid, bar_index, mid, color=na)
+        linefill l_fill = linefill.new(u_line, l_line, na)
+        line a_line = line.new(index, approach_price, bar_index, approach_price, color=na)
+
+        lvl = level.new(index, upper_price, lower_price, mid, vol_sum, false, u_line, l_line, m_line, l_fill, a_line)
+        array.push(levels_array, lvl)
+
+// Modified to disable visualization (color=na).
+// HUB: Added approach_pct parameter.
+f_identify_body_to_line_pb(bool is_bullish, bool signal, array<level> levels_array, color block_color, float signal_line, float approach_pct) =>
+    // Runtime stability: no na propagation.
+    if signal and not na(signal_line)
+        int index = bar_index
+        float price1 = signal_line
+        float price2 = is_bullish ? math.min(open, close) : math.max(open, close)
+        float upper_price = math.max(price1, price2)
+        float lower_price = math.min(price1, price2)
+
+        if math.abs(upper_price - lower_price) >= syminfo.mintick
+            float mid = math.avg(upper_price, lower_price)
+            float vol_sum = volume
+            approach_price = is_bullish ? upper_price * (1 + approach_pct / 100) : lower_price * (1 - approach_pct / 100)
+
+            // Drawing disabled (color=na).
+            line u_line = line.new(index, upper_price, bar_index, upper_price, color=na)
+            line l_line = line.new(index, lower_price, bar_index, lower_price, color=na)
+            line m_line = line.new(index, mid, bar_index, mid, color=na)
+            linefill l_fill = linefill.new(u_line, l_line, na)
+            line a_line = line.new(index, approach_price, bar_index, approach_price, color=na)
+            lvl = level.new(index, upper_price, lower_price, mid, vol_sum, false, u_line, l_line, m_line, l_fill, a_line)
+            array.push(levels_array, lvl)
+
+// -----------------------------------------------------------------------------
+// A.4) ZOOLANDER SEARCH FUNCTION (Boolander)
+// -----------------------------------------------------------------------------
+
+// Modified to include ready_gate (warm-up) and ensure bar-close execution.
+// HUB: Added robustness checks for finding the lowest low.
+f_zoolander_search(bool start_search_signal, bool end_search_signal, color label_color, string label_text, string tooltip_text, bool plot_enable, bool ready_gate) =>
+    var bool looking_for_bottom = false
+    var int search_start_index = na
+    bool signal_confirmed = false
+
+    // Bar-close only: Gated by barstate.isconfirmed.
+    if barstate.isconfirmed
+        // A resistance break (end_search_signal) finalizes a BOTTOM search.
+        if looking_for_bottom and end_search_signal
+
+            // Warm-up readiness: No plot/alert before warmup_bars.
+            if ready_gate
+                int lookback = bar_index - search_start_index
+                // Guard bounds/logic
+                if lookback > 0 and not na(search_start_index)
+
+                    // Robust initialization and search for lowest low
+                    float lowest_price = na
+                    int lowest_index = na
+
+                    // Initialize with the start of the lookback period if valid
+                    if bar_index - lookback >= 0
+                        lowest_price := low[lookback]
+                        lowest_index := bar_index - lookback
+
+                    // Iterate through the lookback period
+                    for i = 0 to lookback
+                        if bar_index - i >= 0
+                            if na(lowest_price) or low[i] < lowest_price
+                                lowest_price := low[i]
+                                lowest_index := bar_index - i
+
+                    // Gated by plot_enable (Global Plot toggle).
+                    if plot_enable and not na(lowest_index)
+                        // Keep only pane labels/markers.
+                        label.new(lowest_index, lowest_price, label_text,
+                             yloc=yloc.belowbar, color=color.new(label_color, 25),
+                             style=label.style_label_up, textcolor=color.white,
+                             tooltip=tooltip_text)
+
+                signal_confirmed := true // Signal confirmation gated by ready_gate.
+
+            looking_for_bottom := false // End the search state regardless of warmup.
+
+        // A support break (start_search_signal) always starts a new BOTTOM search.
+        if start_search_signal
+            looking_for_bottom := true
+            search_start_index := bar_index
+
+    signal_confirmed
+
+// -----------------------------------------------------------------------------
+// A.5) UTILITY FUNCTIONS
+// -----------------------------------------------------------------------------
+
+// Function to manage array size efficiently
+f_manage_array_memory(array<level> arr, int max_size) =>
+    while array.size(arr) > max_size
+        f_delete_level_drawings(array.shift(arr))
+
+// =============================================================================
+// =============================================================================
+// (B) INPUTS & GLOBAL SETTINGS
+// =============================================================================
+// =============================================================================
+
+// =============================================================================
+// (B.1) CALCULATION SETTINGS
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// B.1.2) LSMA Z-Code Calculation Settings
+// -----------------------------------------------------------------------------
+groupCalcLsma = "Calculation: LSMA Z-Code"
+lsma_src = input.source(close, "Calculation Source", group=groupCalcLsma)
+lsma_len = input.int(30, "LSMA Calculation Period", minval=1, group=groupCalcLsma)
+lsma_lookback = input.int(30, "Z-Score Lookback Period", minval=1, group=groupCalcLsma)
+lsma_lbR = input.int(10, "Pivot Lookback Right", minval=1, group=groupCalcLsma, inline="div")
+lsma_lbL = input.int(10, "Pivot Lookback Left", minval=1, group=groupCalcLsma, inline="div")
+
+// -----------------------------------------------------------------------------
+// B.1.3) Boolander Calculation Settings
+// -----------------------------------------------------------------------------
+
+// --- Boolander: PB Sensitivity ---
+var g_set_a = "Calculation: Boolander PB Sensitivity A"
+enable_A = input.bool(true, "Enable Set A", group = g_set_a)
+length1_A = input.int(3, "Sensitivity Detection A", group = g_set_a, minval=1)
+
+var g_set_b = "Calculation: Boolander PB Sensitivity B"
+enable_B = input.bool(true, "Enable Set B", group = g_set_b)
+length1_B = input.int(9, "Sensitivity Detection B", group = g_set_b, minval=1)
+
+var g_set_c = "Calculation: Boolander PB Sensitivity C"
+enable_C = input.bool(true, "Enable Set C", group = g_set_c)
+length1_C = input.int(80, "Sensitivity Detection C", group = g_set_c, minval=1)
+
+// --- Boolander: Internal Constants (Hardcoded Settings from source) ---
+// BelugaCore Engine
+main_price_src_input = ohlc4
+ma_type_input = "VWMA"
+ma_len_input = 3
+// BelugaCore Supertrend
+apply_atr_supertrend_input = true
+atr_period_input = 10
+atr_multiplier_input = 2.0
+// Original PB&J Filter
+pbj_ma_type_input = "EMA"
+pbj_ma_period_input = 20
+pbj_atr_lookback_input = 14
+pbj_hh_lookback = 30
+pbj_ll_lookback = 30
+pbj_atr_mult = 3.0
+pbj_vol_lookback = 20
+pbj_vol_mult = 0.1
+// PB Alert Settings
+float approach_pct = 0.5 // Defined as float for use in functions
+// Lander/Flatline/Reaccel/Broken PBs (Internal for Zoolander)
+enable_lander_pb_input = false
+enable_flatline_pb_input = false
+enable_reaccel_pb_input = false
+enable_broken_pb_input = true
+// BoomPro Constants
+bp_LPPeriod = 6
+bp_K1_input = 0
+bp_trigno = 2
+bp_LPPeriod2 = 27
+bp_K12 = 0.8
+bp_n1 = 9
+bp_n2 = 6
+bp_n3 = 3
+
+// =============================================================================
+// (B.2) GLOBAL PLOT SETTINGS
+// =============================================================================
+groupPlot = "Global Plot Settings"
+
+// 2. LSMA Z-Code
+plot_RB = input.bool(true, "Show LSMA Regular Bull (RB)", group=groupPlot, inline="p2")
+plot_HB = input.bool(true, "Show LSMA Hidden Bull (HB)", group=groupPlot, inline="p2")
+
+// 3. Boolander (Main Signals)
+plot_res_pb_broken = input.bool(true, "Show Resistance PB Broken", group=groupPlot, inline="p3")
+plot_beluga_buy = input.bool(true, "Show Beluga PB Buy", group=groupPlot, inline="p3")
+plot_pbj_buy = input.bool(true, "Show Original PB&J Follow-up Buy", group=groupPlot, inline="p4")
+plot_bs_LongWarning = input.bool(true, "Show BS: Long Entry Warning", group=groupPlot, inline="p5")
+plot_bp_Long = input.bool(true, "Show BP: Long (Consolidated)", group=groupPlot, inline="p6")
+plot_bp_CrossMkLow = input.bool(true, "Show BP: Cross Market Low", group=groupPlot, inline="p6")
+plot_bp_CrossPress = input.bool(true, "Show BP: Crossover w/Pressure", group=groupPlot, inline="p6")
+
+// 4. Boolander (Zoolander Subtypes) - CRITICAL: These control the plotting AND the definition of "Any" in Alerts/Custom Signals
+groupPlotZoo = "Global Plot Settings: Zoolander Subtypes (Controls 'Any' Logic)"
+plot_zoolander_a = input.bool(true, "Zoolander Bottom (PB-A)", group=groupPlotZoo, inline="z1")
+plot_zoolander_b = input.bool(true, "Zoolander Bottom (PB-B)", group=groupPlotZoo, inline="z1")
+plot_zoolander_c = input.bool(true, "Zoolander Bottom (PB-C)", group=groupPlotZoo, inline="z2")
+plot_zoolander_broken = input.bool(true, "Zoolander Bottom (Broken)", group=groupPlotZoo, inline="z4")
+// --- NEW LEGO PIECE (PLOT TOGGLE) ---
+plot_zoolander_any = input.bool(true, "Zoolander Bottom (ANY)", group=groupPlotZoo, inline="z3")
+
+
+// 5. Zoolander Confirmation Triangles
+// --- DELETED --- This entire section was "dead code" and has been removed.
+
+
+// =============================================================================
+// (B.3) GLOBAL ALERT SETTINGS (MULTIPLEXER)
+// =============================================================================
+groupAlerts = "Global Alert Settings (Multiplexer)"
+alert_master_enable = input.bool(true, "Enable Global Alert Multiplexer", group=groupAlerts)
+
+// 2. LSMA Z-Code
+alert_RB = input.bool(true, "LSMA Regular Bull (RB)", group=groupAlerts, inline="a2")
+alert_HB = input.bool(true, "LSMA Hidden Bull (HB)", group=groupAlerts, inline="a2")
+
+// 3. Boolander
+alert_res_pb_broken = input.bool(true, "Resistance PB Broken", group=groupAlerts, inline="a3")
+alert_beluga_buy = input.bool(true, "Beluga PB Buy", group=groupAlerts, inline="a3")
+alert_pbj_buy = input.bool(true, "Original PB&J Follow-up Buy", group=groupAlerts, inline="a4")
+
+// Zoolander (Any - based on Global Plot settings)
+alert_zoolander = input.bool(true, "Zoolander Bottom (Any Selected)", group=groupAlerts, inline="a5")
+
+// --- FIX: Specific Zoolander Alerts ---
+// Added dedicated alert toggles for specific Zoolander types. 
+// Organized into a new group for clarity. Set default to false to avoid redundancy with "Any Selected".
+groupAlertsZoo = "Global Alert Settings: Specific Zoolander Alerts (Multiplexer)"
+alert_zoolander_a = input.bool(false, "Zoolander Bottom (PB-A)", group=groupAlertsZoo, inline="az1")
+alert_zoolander_b = input.bool(false, "Zoolander Bottom (PB-B)", group=groupAlertsZoo, inline="az1")
+alert_zoolander_c = input.bool(false, "Zoolander Bottom (PB-C)", group=groupAlertsZoo, inline="az2")
+alert_zoolander_broken = input.bool(false, "Zoolander Bottom (Broken)", group=groupAlertsZoo, inline="az2")
+alert_zoolander_any_raw = input.bool(false, "Zoolander Bottom (ANY)", group=groupAlertsZoo, inline="az3")
+// --- END FIX ---
+
+alert_bs_LongWarning = input.bool(true, "BS: Long Entry Warning", group=groupAlerts, inline="a6")
+alert_bp_Long = input.bool(true, "BP: Long (Consolidated)", group=groupAlerts, inline="a7")
+alert_bp_CrossMkLow = input.bool(true, "BP: Cross Market Low", group=groupAlerts, inline="a7")
+alert_bp_CrossPress = input.bool(true, "BP: Crossover w/Pressure", group=groupAlerts, inline="a7")
+
+
+// =============================================================================
+// (B.4) STYLE SETTINGS
+// =============================================================================
+
+// --- DELETED ---
+// This entire section was redundant. All styling is now correctly handled
+// by the "Style" tab in the indicator settings, as is standard practice.
+
+
+// =============================================================================
+// =============================================================================
+// (C) CALCULATIONS
+// =============================================================================
+// =============================================================================
+
+// =============================================================================
+// (C.0) WARMUP AND GATING
+// =============================================================================
+// Calculate unified warmup period based on the maximum requirement across all indicators.
+
+int max_pb_lookback = math.max(length1_A, length1_B, length1_C) + 13
+int max_static_lookback = 30 // Based on pbj_hh/ll_lookback (Boolander)
+int max_lsma_lookback = lsma_len + lsma_lookback + math.max(lsma_lbL, lsma_lbR)
+
+// Added a buffer (50) for IIR filter stabilization (Ehlers filters in Boolander).
+var int warmup_bars = math.max(math.max(max_pb_lookback, max_static_lookback), max_lsma_lookback) + 50
+
+// Gating definitions.
+bool is_ready = bar_index >= warmup_bars
+bool on_close = barstate.isconfirmed
+// Combined gate: event = gate and <raw_condition>. Provides unified non-repainting and warmup protection.
+bool gate = is_ready and on_close
+
+// =============================================================================
+// (C.2) LSMA Z-CODE CALCULATIONS
+// =============================================================================
+
+//─ Core calcs
+subject = ta.linreg(lsma_src, lsma_len, 0)
+mean = ta.ema(subject, lsma_lookback)
+stdDev = ta.stdev(subject, lsma_lookback)
+// Use safe division
+zScore = safe_div(subject - mean, stdDev)
+
+plFound = not na(ta.pivotlow(zScore, lsma_lbL, lsma_lbR))
+
+_inRange(cond) =>
+    b = ta.barssince(cond == true)
+    // Robustness check: ensure b is not na (ta.barssince returns na if condition never met)
+    not na(b) and -80 <= b and b <= 80
+
+// Robustness check: Ensure lookback lsma_lbR is valid before accessing historical elements
+bool lsma_valid_lookback = bar_index >= lsma_lbR
+
+// Regular Bullish: price LL + oscillator HL
+// Use nz() for safety when accessing historical data.
+oscHL = lsma_valid_lookback and nz(zScore[lsma_lbR]) > ta.valuewhen(plFound, nz(zScore[lsma_lbR]), 1) and _inRange(plFound[1])
+priceLL = lsma_valid_lookback and low[lsma_lbR] < ta.valuewhen(plFound, low[lsma_lbR], 1)
+rbRaw = priceLL and oscHL and plFound
+
+// Hidden Bullish: price HL + oscillator LL
+oscLL = lsma_valid_lookback and nz(zScore[lsma_lbR]) < ta.valuewhen(plFound, nz(zScore[lsma_lbR]), 1) and _inRange(plFound[1])
+priceHL = lsma_valid_lookback and low[lsma_lbR] > ta.valuewhen(plFound, low[lsma_lbR], 1)
+hbRaw = priceHL and oscLL and plFound
+
+// Final Gated Signals
+bool event_RB = rbRaw and gate
+bool event_HB = hbRaw and gate
+
+// =============================================================================
+// (C.3) BOOLANDER CALCULATIONS
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// C.3.1) BOOM SCREENER CALCULATIONS (Boolander)
+// -----------------------------------------------------------------------------
+// Kept for Signal 5.
+
+// --- EOT Calculation ---
+var bs_HP2 = 0.00
+var bs_Filt2 = 0.00
+var bs_Peak2 = 0.00
+
+// Constants (Local to Boom Screener)
+float bs_LPPeriod2 = 20.0
+float bs_K12_const = 0.8
+float bs_pi = math.pi
+
+// Highpass Filter
+float bs_alpha1222 = (math.cos( .707 * 2 * bs_pi / 100 ) + math.sin( .707 * 2 * bs_pi / 100 ) - 1 ) / math.cos( .707 * 2 * bs_pi / 100 )
+bs_HP2 := ( 1 - bs_alpha1222 / 2 )*( 1 - bs_alpha1222 / 2 )*( close - 2 * nz(close[1]) + nz(close[2]) ) + 2 * ( 1 - bs_alpha1222 ) * nz(bs_HP2[1]) - ( 1 - bs_alpha1222 ) * ( 1 - bs_alpha1222 ) * nz(bs_HP2[2])
+
+// SuperSmoother Filter
+float bs_a12 = math.exp( -1.414 * bs_pi / bs_LPPeriod2 )
+float bs_b12 = 2 * bs_a12 * math.cos( 1.414*bs_pi / bs_LPPeriod2 )
+float bs_c22 = bs_b12
+float bs_c32 = -bs_a12 * bs_a12
+float bs_c12 = 1 - bs_c22 - bs_c32
+bs_Filt2 := bs_c12 * ( bs_HP2 + nz(bs_HP2[1]) ) / 2 + bs_c22 * nz(bs_Filt2[1]) + bs_c32 * nz(bs_Filt2[2])
+
+// Fast Attack - Slow Decay Algorithm
+bs_Peak2 := .991 * nz(bs_Peak2[1])
+if math.abs( bs_Filt2 ) > bs_Peak2
+    bs_Peak2 := math.abs( bs_Filt2 )
+
+// Normalized Roofing Filter
+float bs_X2 = safe_div(bs_Filt2, bs_Peak2)
+
+float bs_Quotient3 = ( bs_X2 + bs_K12_const ) / ( bs_K12_const * bs_X2 + 1 )
+
+// --- Signal Definitions (Raw) ---
+bool bs_signal_LongWarning = ta.crossunder(bs_Quotient3, -0.9)
+
+// -----------------------------------------------------------------------------
+// C.3.2) BOOMPRO CALCULATIONS (Boolander)
+// -----------------------------------------------------------------------------
+// Kept for Signals 6, 7, 8.
+
+// --- Constants and Derived Inputs ---
+float bp_pi = math.pi
+
+// --- EOT 1 (Main Oscillator) ---
+var bp_HP = 0.00
+var bp_Filt = 0.00
+var bp_Peak = 0.00
+
+// Highpass filter
+float bp_alpha1 = (math.cos(.707 * 2 * bs_pi / 100) + math.sin(.707 * 2 * bs_pi / 100) - 1) / math.cos(.707 * 2 * bs_pi / 100)
+bp_HP := (1 - bp_alpha1 / 2) * (1 - bp_alpha1 / 2) * (close - 2 * nz(close[1]) + nz(close[2])) + 2 * (1 - bp_alpha1) * nz(bp_HP[1]) - (1 - bp_alpha1) * (1 - bp_alpha1) * nz(bp_HP[2])
+
+// SuperSmoother Filter
+float bp_a1 = math.exp(-1.414 * bp_pi / bp_LPPeriod)
+float bp_b1 = 2 * bp_a1 * math.cos(1.414 * bp_pi / bp_LPPeriod)
+float bp_c2 = bp_b1
+float bp_c3 = -bp_a1 * bp_a1
+float bp_c1 = 1 - bp_c2 - bp_c3
+bp_Filt := bp_c1 * (bp_HP + nz(bp_HP[1])) / 2 + bp_c2 * nz(bp_Filt[1]) + bp_c3 * nz(bp_Filt[2])
+
+// Fast Attack - Slow Decay Algorithm
+bp_Peak := .991 * nz(bp_Peak[1])
+if math.abs(bp_Filt) > bp_Peak
+    bp_Peak := math.abs(bp_Filt)
+
+// Normalized Roofing Filter
+float bp_X = safe_div(bp_Filt, bp_Peak)
+
+float bp_Quotient1 = (bp_X + bp_K1_input) / (bp_K1_input * bp_X + 1)
+
+// --- EOT 2 (Red Wave) ---
+var bp_HP2 = 0.00
+var bp_Filt2 = 0.00
+var bp_Peak2 = 0.00
+
+// Highpass filter
+float bp_alpha1222 = (math.cos(.707 * 2 * bs_pi / 100) + math.sin(.707 * 2 * bs_pi / 100) - 1) / math.cos(.707 * 2 * bs_pi / 100)
+bp_HP2 := (1 - bp_alpha1222 / 2) * (1 - bp_alpha1222 / 2) * (close - 2 * nz(close[1]) + nz(close[2])) + 2 * (1 - bp_alpha1222) * nz(bp_HP2[1]) - (1 - bp_alpha1222) * (1 - bp_alpha1222) * nz(bp_HP2[2])
+
+// SuperSmoother Filter
+float bp_a12 = math.exp(-1.414 * bp_pi / bp_LPPeriod2)
+float bp_b12 = 2 * bp_a12 * math.cos(1.414 * bp_pi / bp_LPPeriod2)
+float bp_c22 = bp_b12
+float bp_c32 = -bp_a12 * bp_a12
+float bp_c12 = 1 - bp_c22 - bp_c32
+bp_Filt2 := bp_c12 * (bp_HP2 + nz(bp_HP2[1])) / 2 + bp_c22 * nz(bp_Filt2[1]) + bp_c32 * nz(bp_Filt2[2])
+
+// Fast Attack - Slow Decay Algorithm
+bp_Peak2 := .991 * nz(bp_Peak2[1])
+if math.abs(bp_Filt2) > bp_Peak2
+    bp_Peak2 := math.abs(bp_Filt2)
+
+// Normalized Roofing Filter
+float bp_X2 = safe_div(bp_Filt2, bp_Peak2)
+
+float bp_Quotient3 = (bp_X2 + bp_K12) / (bp_K12 * bp_X2 + 1)
+
+// --- LSMAWT Functions ---
+bp_src5 = hlc3
+
+bp_tci(src) =>
+    ema_src = ta.ema(src, bp_n1)
+    ema_abs_diff = ta.ema(math.abs(src - ema_src), bp_n1)
+    denominator = 0.025 * ema_abs_diff
+    normalized_diff = safe_div(src - ema_src, denominator)
+    ta.ema(normalized_diff, bp_n2) + 50
+
+bp_mf(src) =>
+    // Original logic for MFI div-by-zero handling.
+    denom = math.sum(volume * (ta.change(src) >= 0 ? 0 : src), bp_n3)
+    // Replicating original guard exactly for O3.
+    100.0 - 100.0 / (1.0 + math.sum(volume * (ta.change(src) <= 0 ? 0 : src), bp_n3) / (denom == 0 ? 1e-10 : denom))
+
+bp_tradition(src) =>
+    math.avg(bp_tci(src), bp_mf(src), ta.rsi(src, bp_n3))
+
+// --- LSMAWT Calculations ---
+float bp_wt1 = bp_tradition(bp_src5)
+float bp_wt2 = ta.sma(bp_wt1, 6) // Hardcoded 6 from original
+
+// --- EOT Scaling for q1 and trigger ---
+float bp_esize = 60.0
+float bp_ey = 50.0
+
+// Calculate scaled EOT 1
+float bp_q1 = bp_Quotient1 * bp_esize + bp_ey
+float bp_trigger = ta.sma(bp_q1, bp_trigno)
+
+// --- Crossover/Crossunder ---
+bool bp_crossover = ta.crossover(bp_q1, bp_trigger)
+bool bp_crossunder = ta.crossunder(bp_q1, bp_trigger)
+
+// --- Signal Definitions (Raw) ---
+
+// Warnings
+bool bp_warn2 = ta.crossover(bp_Quotient1, -0.9)
+
+// Long Entries
+// Robustness check: Use nz() around ta.barssince() results as they return na if condition never met
+bool bp_enter3 = bp_Quotient3 <= -0.9 and bp_crossover and nz(ta.barssince(bp_warn2)) <= 7 and bp_q1 <= 20 and nz(ta.barssince(ta.crossover(bp_q1, 20))) <= 21
+bool bp_enter5 = nz(ta.barssince(bp_q1 <= 0 and bp_crossunder)) <= 5 and bp_crossover
+bool bp_enter6 = nz(ta.barssince(bp_q1 <= 20 and bp_crossunder)) <= 11 and bp_crossover
+bool bp_enter7 = bp_Quotient3 <= -0.9 and bp_crossover
+
+// --- Consolidated Signals (Raw) ---
+
+// 6. Consolidated Long
+bool bp_signal_Long = (bp_enter6 and bp_q1 <= 60) or bp_enter7 or bp_enter5 or bp_enter3
+
+// 7. Cross Market Low
+bool bp_signal_CrossMkLow = (bp_Quotient1 <= -0.9 and bp_crossover)
+
+// 8. Cross Press (Crossover w/Pressure)
+bool bp_signal_CrossPress = (bp_wt2 <= 20 and bp_crossover)
+
+// -----------------------------------------------------------------------------
+// C.3.3) BELUGACORE CALCULATIONS (Boolander)
+// -----------------------------------------------------------------------------
+// Kept for Signals 1, 2, 3, 4.
+
+// --- PB&JLander Engine ---
+base_ma_val = f_base_ma(main_price_src_input, ma_len_input, ma_type_input)
+ma_signal_line_val = 0.0
+var supertrend_dir_val = 1
+
+// Supertrend Logic
+if (apply_atr_supertrend_input)
+    atr_value = atr_multiplier_input * ta.atr(atr_period_input)
+    dynamic_longStop = base_ma_val - atr_value
+    dynamic_shortStop = base_ma_val + atr_value
+
+    // Exact replication of SuperTrend calculation and nz handling.
+    float current_long_ST = 0.0
+    current_long_ST := base_ma_val > nz(current_long_ST[1], dynamic_longStop) ? math.max(dynamic_longStop, nz(current_long_ST[1])) : dynamic_longStop
+    float current_short_ST = 0.0
+    current_short_ST := base_ma_val < nz(current_short_ST[1], dynamic_shortStop) ? math.min(dynamic_shortStop, nz(current_short_ST[1])) : dynamic_shortStop
+
+    // Ensure direction change logic uses nz on historical references.
+    if (nz(supertrend_dir_val[1]) == -1 and main_price_src_input > nz(current_short_ST[1]))
+        supertrend_dir_val := 1
+    else if (nz(supertrend_dir_val[1]) == 1 and main_price_src_input < nz(current_long_ST[1]))
+        supertrend_dir_val := -1
+    ma_signal_line_val := supertrend_dir_val == 1 ? current_long_ST : current_short_ST
+else
+    ma_signal_line_val := base_ma_val
+
+// Lander signals
+lander_buy_signal = ta.crossover(main_price_src_input, ma_signal_line_val)
+lander_sell_signal = ta.crossunder(main_price_src_input, ma_signal_line_val)
+bullish_state = (apply_atr_supertrend_input) ? supertrend_dir_val == 1 : main_price_src_input > ma_signal_line_val
+
+// --- Original PB&J Filter ---
+pbj_ma_value = f_pbj_ma(pbj_ma_type_input, close, pbj_ma_period_input)
+pbj_atr_value = ta.atr(pbj_atr_lookback_input)
+
+// Buy conditions (Required for Signal 3)
+buy_avg_volume = ta.sma(volume, pbj_vol_lookback)
+buy_threshold_perc = safe_div(pbj_atr_value, close) * pbj_atr_mult
+price_cond_buy = low < pbj_ma_value * (1 - buy_threshold_perc)
+ll_cond_buy = low == ta.lowest(low, pbj_ll_lookback)
+vol_cond_buy = volume > buy_avg_volume * pbj_vol_mult
+pbj_buy_condition = price_cond_buy and ll_cond_buy and vol_cond_buy
+
+// --- Trend Line Acceleration/Deceleration Signals ---
+// (Required for Zoolander Flatline/Reaccel subtypes)
+// Robustness check: Ensure lookback indices are valid
+bool valid_lookback_1 = bar_index >= 1
+bool valid_lookback_2 = bar_index >= 2
+
+is_rising = valid_lookback_1 and ma_signal_line_val > nz(ma_signal_line_val[1])
+is_falling = valid_lookback_1 and ma_signal_line_val < nz(ma_signal_line_val[1])
+is_flat = valid_lookback_1 and ma_signal_line_val == nz(ma_signal_line_val[1])
+green_flat_line_signal = valid_lookback_2 and bullish_state and is_flat and nz(ma_signal_line_val[1]) > nz(ma_signal_line_val[2])
+bull_reacceleration_signal = valid_lookback_2 and bullish_state and is_rising and nz(ma_signal_line_val[1]) == nz(ma_signal_line_val[2])
+red_flat_line_signal = valid_lookback_2 and not bullish_state and is_flat and nz(ma_signal_line_val[1]) < nz(ma_signal_line_val[2])
+bear_reacceleration_signal = valid_lookback_2 and not bullish_state and is_falling and nz(ma_signal_line_val[1]) == nz(ma_signal_line_val[2])
+
+// --- Propulsion Block Engine ---
+float atr14 = ta.atr(14)
+
+// Lengths and EMAs
+int length2_A = length1_A + 13
+int length2_B = length1_B + 13
+int length2_C = length1_C + 13
+float ema1_A = ta.ema(close, length1_A)
+float ema2_A = ta.ema(close, length2_A)
+float ema1_B = ta.ema(close, length1_B)
+float ema2_B = ta.ema(close, length2_B)
+float ema1_C = ta.ema(close, length1_C)
+float ema2_C = ta.ema(close, length2_C)
+bool cross_up_A = ta.crossover(ema1_A, ema2_A)
+bool cross_dn_A = ta.crossunder(ema1_A, ema2_A)
+bool cross_up_B = ta.crossover(ema1_B, ema2_B)
+bool cross_dn_B = ta.crossunder(ema1_B, ema2_B)
+bool cross_up_C = ta.crossover(ema1_C, ema2_C)
+bool cross_dn_C = ta.crossunder(ema1_C, ema2_C)
+
+// FIX: Ensure ta.lowest/ta.highest are called unconditionally (Compiler requirement).
+// Calculate raw values first.
+float raw_lowest_A = ta.lowest(length2_A)
+float raw_highest_A = ta.highest(length2_A)
+float raw_lowest_B = ta.lowest(length2_B)
+float raw_highest_B = ta.highest(length2_B)
+float raw_lowest_C = ta.lowest(length2_C)
+float raw_highest_C = ta.highest(length2_C)
+
+// Robustness check: Use the raw values only if the lookback period is valid.
+float lowest_A = bar_index >= length2_A - 1 ? raw_lowest_A : na
+float highest_A = bar_index >= length2_A - 1 ? raw_highest_A : na
+float lowest_B = bar_index >= length2_B - 1 ? raw_lowest_B : na
+float highest_B = bar_index >= length2_B - 1 ? raw_highest_B : na
+float lowest_C = bar_index >= length2_C - 1 ? raw_lowest_C : na
+float highest_C = bar_index >= length2_C - 1 ? raw_highest_C : na
+
+
+// Arrays: Use 'var' for persistence.
+var upper_lvl_A = array.new<level>()
+var lower_lvl_A = array.new<level>()
+var upper_lvl_B = array.new<level>()
+var lower_lvl_B = array.new<level>()
+var upper_lvl_C = array.new<level>()
+var lower_lvl_C = array.new<level>()
+// Arrays for Zoolander subtypes
+var upper_lvl_lander = array.new<level>()
+var lower_lvl_lander = array.new<level>()
+var upper_lvl_flatline = array.new<level>()
+var lower_lvl_flatline = array.new<level>()
+var upper_lvl_reaccel = array.new<level>()
+var lower_lvl_reaccel = array.new<level>()
+var upper_lvl_broken = array.new<level>()
+var lower_lvl_broken = array.new<level>()
+
+// --- Master PB State Variables ---
+var bool bullish_pb_broken = false
+var bool bearish_pb_broken = false
+var bool beluga_pb_approach_buy = false
+
+// --- Discrete PB Break Variables (for Zoolander) ---
+var bool a_bull_broken = false
+var bool a_bear_broken = false
+var bool b_bull_broken = false
+var bool b_bear_broken = false
+var bool c_bull_broken = false
+var bool c_bear_broken = false
+var bool lander_bull_broken = false
+var bool lander_bear_broken = false
+var bool flat_bull_broken = false
+var bool flat_bear_broken = false
+var bool reaccel_bull_broken = false
+var bool reaccel_bear_broken = false
+var bool broken_bull_broken = false
+var bool broken_bear_broken = false
+
+// (A) O3 Parity: State management must match original execution flow (reset on bar close).
+if barstate.isconfirmed
+    // Reset master flags
+    bullish_pb_broken := false
+    bearish_pb_broken := false
+    beluga_pb_approach_buy := false
+    // Reset discrete flags
+    a_bull_broken := false
+    a_bear_broken := false
+    b_bull_broken := false
+    b_bear_broken := false
+    c_bull_broken := false
+    c_bear_broken := false
+    lander_bull_broken := false
+    lander_bear_broken := false
+    flat_bull_broken := false
+    flat_bear_broken := false
+    reaccel_bull_broken := false
+    reaccel_bear_broken := false
+    broken_bull_broken := false
+    broken_bear_broken := false
+
+// PB Engine Execution
+// HUB: Passing approach_pct explicitly.
+
+if enable_A
+    // Check for valid lowest/highest values before calling f_identify_pb
+    if not na(highest_A) and not na(lowest_A)
+        f_identify_pb(true, cross_up_A, length2_A, lower_lvl_A, na, highest_A, lowest_A, atr14, approach_pct)
+        f_identify_pb(false, cross_dn_A, length2_A, upper_lvl_A, na, highest_A, lowest_A, atr14, approach_pct)
+    [a_bull_broken_local, a_bull_approach, a_bull_bounce] = f_manage_levels(lower_lvl_A, true, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    [a_bear_broken_local, a_bear_approach, a_bear_bounce] = f_manage_levels(upper_lvl_A, false, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    a_bull_broken := a_bull_broken_local
+    a_bear_broken := a_bear_broken_local
+    if a_bull_broken
+        bullish_pb_broken := true
+    if a_bull_approach
+        beluga_pb_approach_buy := true
+    if a_bear_broken
+        bearish_pb_broken := true
+
+if enable_B
+    if not na(highest_B) and not na(lowest_B)
+        f_identify_pb(true, cross_up_B, length2_B, lower_lvl_B, na, highest_B, lowest_B, atr14, approach_pct)
+        f_identify_pb(false, cross_dn_B, length2_B, upper_lvl_B, na, highest_B, lowest_B, atr14, approach_pct)
+    [b_bull_broken_local, b_bull_approach, b_bull_bounce] = f_manage_levels(lower_lvl_B, true, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    [b_bear_broken_local, b_bear_approach, b_bear_bounce] = f_manage_levels(upper_lvl_B, false, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    b_bull_broken := b_bull_broken_local
+    b_bear_broken := b_bear_broken_local
+    if b_bull_broken
+        bullish_pb_broken := true
+    if b_bull_approach
+        beluga_pb_approach_buy := true
+    if b_bear_broken
+        bearish_pb_broken := true
+
+if enable_C
+    if not na(highest_C) and not na(lowest_C)
+        f_identify_pb(true, cross_up_C, length2_C, lower_lvl_C, na, highest_C, lowest_C, atr14, approach_pct)
+        f_identify_pb(false, cross_dn_C, length2_C, upper_lvl_C, na, highest_C, lowest_C, atr14, approach_pct)
+    [c_bull_broken_local, c_bull_approach, c_bull_bounce] = f_manage_levels(lower_lvl_C, true, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    [c_bear_broken_local, c_bear_approach, c_bear_bounce] = f_manage_levels(upper_lvl_C, false, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    c_bull_broken := c_bull_broken_local
+    c_bear_broken := c_bear_broken_local
+    if c_bull_broken
+        bullish_pb_broken := true
+    if c_bull_approach
+        beluga_pb_approach_buy := true
+    if c_bear_broken
+        bearish_pb_broken := true
+
+// Subtype PB Execution (Required for Zoolander)
+if enable_lander_pb_input
+    f_identify_lander_pb(true, lander_buy_signal, lower_lvl_lander, na, atr14, approach_pct)
+    f_identify_lander_pb(false, lander_sell_signal, upper_lvl_lander, na, atr14, approach_pct)
+    [lander_bull_broken_local, lander_bull_approach, lander_bull_bounce] = f_manage_levels(lower_lvl_lander, true, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    [lander_bear_broken_local, lander_bear_approach, lander_bear_bounce] = f_manage_levels(upper_lvl_lander, false, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    lander_bull_broken := lander_bull_broken_local
+    lander_bear_broken := lander_bear_broken_local
+
+if enable_flatline_pb_input
+    f_identify_body_to_line_pb(true, green_flat_line_signal, lower_lvl_flatline, na, ma_signal_line_val, approach_pct)
+    f_identify_body_to_line_pb(false, red_flat_line_signal, upper_lvl_flatline, na, ma_signal_line_val, approach_pct)
+    [flat_bull_broken_local, flat_bull_approach, flat_bull_bounce] = f_manage_levels(lower_lvl_flatline, true, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    [flat_bear_broken_local, flat_bear_approach, flat_bear_bounce] = f_manage_levels(upper_lvl_flatline, false, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    flat_bull_broken := flat_bull_broken_local
+    flat_bear_broken := flat_bear_broken_local
+
+if enable_reaccel_pb_input
+    f_identify_body_to_line_pb(true, bull_reacceleration_signal, lower_lvl_reaccel, na, ma_signal_line_val, approach_pct)
+    f_identify_body_to_line_pb(false, bear_reacceleration_signal, upper_lvl_reaccel, na, ma_signal_line_val, approach_pct)
+    [reaccel_bull_broken_local, reaccel_bull_approach, reaccel_bull_bounce] = f_manage_levels(lower_lvl_reaccel, true, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    [reaccel_bear_broken_local, reaccel_bear_approach, reaccel_bear_bounce] = f_manage_levels(upper_lvl_reaccel, false, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    reaccel_bull_broken := reaccel_bull_broken_local
+    reaccel_bear_broken := reaccel_bear_broken_local
+
+if enable_broken_pb_input
+    [broken_bull_broken_local, broken_bull_approach, broken_bull_bounce] = f_manage_levels(lower_lvl_broken, true, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    broken_bull_broken := broken_bull_broken_local
+    [broken_bear_broken_local, broken_bear_approach, broken_bear_bounce] = f_manage_levels(upper_lvl_broken, false, lower_lvl_broken, upper_lvl_broken, enable_broken_pb_input, na, na, atr14, approach_pct)
+    broken_bear_broken := broken_bear_broken_local
+
+// --- Manage PB Array Memory ---
+int max_levels = 10
+f_manage_array_memory(lower_lvl_A, max_levels)
+f_manage_array_memory(upper_lvl_A, max_levels)
+f_manage_array_memory(lower_lvl_B, max_levels)
+f_manage_array_memory(upper_lvl_B, max_levels)
+f_manage_array_memory(lower_lvl_C, max_levels)
+f_manage_array_memory(upper_lvl_C, max_levels)
+f_manage_array_memory(lower_lvl_lander, max_levels)
+f_manage_array_memory(upper_lvl_lander, max_levels)
+f_manage_array_memory(lower_lvl_flatline, max_levels)
+f_manage_array_memory(upper_lvl_flatline, max_levels)
+f_manage_array_memory(lower_lvl_reaccel, max_levels)
+f_manage_array_memory(upper_lvl_reaccel, max_levels)
+f_manage_array_memory(lower_lvl_broken, max_levels)
+f_manage_array_memory(upper_lvl_broken, max_levels)
+
+
+// -----------------------------------------------------------------------------
+// C.3.4) ZOOLANDER TOP/BOTTOM LOGIC (Boolander)
+// -----------------------------------------------------------------------------
+
+// --- Run the 7 discrete Zoolander search functions ---
+string tooltip_zoo = "Lowest low between Support PB break and subsequent Resistance PB break."
+// HUB: Pass the Global Plot setting (plot_zoolander_*) as 'plot_enable' and the Global Style color.
+// FIX: Replaced redundant style variables with hardcoded default colors.
+// Note: These variables (zoo_bottom_*) are already gated (non-repainting) by the logic inside f_zoolander_search.
+bool zoo_bottom_A = f_zoolander_search(a_bull_broken, a_bear_broken, color.lime, "Zoolander\nBottom (A)", tooltip_zoo, plot_zoolander_a, is_ready)
+bool zoo_bottom_B = f_zoolander_search(b_bull_broken, b_bear_broken, color.lime, "Zoolander\nBottom (B)", tooltip_zoo, plot_zoolander_b, is_ready)
+bool zoo_bottom_C = f_zoolander_search(c_bull_broken, c_bear_broken, color.lime, "Zoolander\nBottom (C)", tooltip_zoo, plot_zoolander_c, is_ready)
+bool zoo_bottom_broken = f_zoolander_search(broken_bull_broken, broken_bear_broken, color.lime, "Zoolander\nBottom (Br)", tooltip_zoo, plot_zoolander_broken, is_ready)
+
+// --- NEW LEGO PIECE (RAW CALCULATION) ---
+// This is the raw "ANY" signal, independent of any plot toggles.
+bool zoo_bottom_ANY_RAW = zoo_bottom_A or zoo_bottom_B or zoo_bottom_C or zoo_bottom_broken
+
+// --- Create the master "Any – Selected" signal ---
+// CRITICAL IMPLEMENTATION: This logic ensures that "Any" means "Any that the user checked in Global Plotting".
+// This variable is still required for the alerts.
+bool zoolander_bottom_ANY_Selected =
+     (plot_zoolander_a and zoo_bottom_A) or
+     (plot_zoolander_b and zoo_bottom_B) or
+     (plot_zoolander_c and zoo_bottom_C) or
+     (plot_zoolander_broken and zoo_bottom_broken)
+
+// --- Determine the "flavor" for the dynamic alert message ---
+var string zoolander_alert_flavor = ""
+if (plot_zoolander_a and zoo_bottom_A)
+    zoolander_alert_flavor := "Zoolander Bottom (PB-A)"
+else if (plot_zoolander_b and zoo_bottom_B)
+    zoolander_alert_flavor := "Zoolander Bottom (PB-B)"
+else if (plot_zoolander_c and zoo_bottom_C)
+    zoolander_alert_flavor := "Zoolander Bottom (PB-C)"
+else if (plot_zoolander_broken and zoo_bottom_broken)
+    zoolander_alert_flavor := "Zoolander Bottom (Broken)"
+
+// -----------------------------------------------------------------------------
+// C.3.5) SIGNAL LOGIC & STATE MANAGEMENT (Boolander/BelugaCore)
+// -----------------------------------------------------------------------------
+
+// --- State Management for Beluga PB Approach Alerts (Signal 2) ---
+var bool waiting_for_lander_buy_after_beluga_pb = false
+if beluga_pb_approach_buy
+    waiting_for_lander_buy_after_beluga_pb := true
+bool beluga_support_buy_signal = lander_buy_signal and waiting_for_lander_buy_after_beluga_pb
+if beluga_support_buy_signal
+    waiting_for_lander_buy_after_beluga_pb := false
+
+// --- State Management for original PB&J Follow-up (Signal 3) ---
+var bool waiting_for_lander_buy_after_pbj = false
+if pbj_buy_condition
+    waiting_for_lander_buy_after_pbj := true
+bool pbj_followup_buy_signal = lander_buy_signal and waiting_for_lander_buy_after_pbj
+if pbj_followup_buy_signal
+    waiting_for_lander_buy_after_pbj := false
+
+// -----------------------------------------------------------------------------
+// C.3.6) GATED SIGNALS (Boolander Final Events)
+// -----------------------------------------------------------------------------
+
+// 1. Beluga/Core: Resistance PB Broken
+bool event_res_pb_broken = gate and bearish_pb_broken
+// 2. Beluga/Core: Beluga PB Buy
+bool event_beluga_buy = gate and beluga_support_buy_signal
+// 3. Beluga/Core: Original PB&J Follow-up Buy
+bool event_pbj_buy = gate and pbj_followup_buy_signal
+
+// 4. Beluga/Core: Zoolander Bottom (Any – Selected)
+// Gating is applied within f_zoolander_search (via is_ready and barstate.isconfirmed) and inherited by the composite.
+bool event_zoolander_any_selected = zoolander_bottom_ANY_Selected
+
+// 5. Boom Screener: BS: Long Entry Warning
+bool event_bs_LongWarning = gate and bs_signal_LongWarning
+
+// 6. Boom Pro: BP: Long (Consolidated)
+bool event_bp_Long = gate and bp_signal_Long
+// 7. Boom Pro: BP: Cross Market Low
+bool event_bp_CrossMkLow = gate and bp_signal_CrossMkLow
+// 8. Boom Pro: BP: Crossover w/Pressure
+bool event_bp_CrossPress = gate and bp_signal_CrossPress
+
+
+// =============================================================================
+// =============================================================================
+// (E) PLOTTING
+// =============================================================================
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// E.2) LSMA Z-CODE PLOTTING
+// -----------------------------------------------------------------------------
+// Drawn on pivot bar via offset=-lsma_lbR.
+// FIX: Replaced style variables with hardcoded default values.
+plotshape(plot_RB and event_RB ? 1 : na, title="RB Bottom", style=shape.square,
+     location=location.bottom, size=size.normal, color=color.new(color.lime, 0), text="RB",
+     textcolor=color.white, offset=-lsma_lbR)
+
+plotshape(plot_HB and event_HB ? 1 : na, title="HB Bottom", style=shape.square,
+     location=location.bottom, size=size.normal, color=color.new(color.teal, 0), text="HB",
+     textcolor=color.white, offset=-lsma_lbR)
+
+// -----------------------------------------------------------------------------
+// E.3) BOOLANDER PLOTTING
+// -----------------------------------------------------------------------------
+// FIX: Replaced style variables with hardcoded default values.
+
+// BelugaCore
+plotshape(event_res_pb_broken and plot_res_pb_broken, "Resistance PB Broken", shape.xcross, location.belowbar, color.new(color.lime, 20), size=size.tiny)
+plotshape(event_beluga_buy and plot_beluga_buy, "Beluga PB Buy", shape.labelup, location.belowbar, color.new(color.aqua, 0), size=size.small, text="B", textcolor=color.white)
+
+// FIX: Added 'color=' parameter name to fix syntax error AND replaced style variable.
+plotchar(event_pbj_buy and plot_pbj_buy, "Original PB&J Follow-up Buy", char='★', location=location.belowbar, color=color.new(color.green, 0), size=size.large)
+
+// Zoolander "Any" Style Handle (for Style Tab)
+// --- DELETED --- This consolidated plot was replaced by the four plots below.
+
+// --- NEW PLOTS (FIX for "Signal Discrimination" and labeling) ---
+// These will now each have their own row in the "Style" tab.
+
+// Plot for Zoo-A
+plotshape(zoo_bottom_A and plot_zoolander_a,
+     title="Zoolander Bottom (PB-A)",
+     style=shape.triangleup,
+     location=location.belowbar,
+     size=size.normal,
+     color=color.new(color.lime, 0), // Default color
+     text="Zoo-A",
+     textcolor=color.white)
+
+// Plot for Zoo-B
+plotshape(zoo_bottom_B and plot_zoolander_b,
+     title="Zoolander Bottom (PB-B)",
+     style=shape.triangleup,
+     location=location.belowbar,
+     size=size.normal,
+     color=color.new(color.lime, 0), // Default color
+     text="Zoo-B",
+     textcolor=color.white)
+
+// Plot for Zoo-C
+plotshape(zoo_bottom_C and plot_zoolander_c,
+     title="Zoolander Bottom (PB-C)",
+     style=shape.triangleup,
+     location=location.belowbar,
+     size=size.normal,
+     color=color.new(color.lime, 0), // Default color
+     text="Zoo-C",
+     textcolor=color.white)
+
+// Plot for Zoo-Broken
+plotshape(zoo_bottom_broken and plot_zoolander_broken,
+     title="Zoolander Bottom (Broken)",
+     style=shape.triangleup,
+     location=location.belowbar,
+     size=size.normal,
+     color=color.new(color.lime, 0), // Default color
+     text="Zoo-Br",
+     textcolor=color.white)
+
+// --- NEW LEGO PIECE (PLOTSHAPE) ---
+plotshape(zoo_bottom_ANY_RAW and plot_zoolander_any,
+     title="Zoolander Bottom (ANY)",
+     style=shape.triangleup,
+     location=location.belowbar,
+     size=size.large, // Make it bigger by default
+     color=color.new(color.yellow, 0), // Make it yellow by default
+     text="ZOO-ANY",
+     textcolor=color.white)
+// --- END NEW PLOTS ---
+
+
+// Zoolander text labels are plotted dynamically inside f_zoolander_search using the Global Plot settings.
+
+// Boom Screener
+// FIX: Replaced style variable with hardcoded default value.
+plotshape(event_bs_LongWarning and plot_bs_LongWarning, title="BS: Long Entry Warning", location=location.abovebar, style=shape.circle, size=size.tiny, color=color.new(color.lime, 20))
+
+// BoomPro
+// FIX: Replaced style variables with hardcoded default values.
+plotshape(event_bp_Long and plot_bp_Long, title='BP: Long (Consolidated)', style=shape.labeldown, location=location.abovebar, color=color.new(color.lime, 20), text="Long", textcolor=color.white, size=size.tiny)
+plotshape(event_bp_CrossMkLow and plot_bp_CrossMkLow, title='BP: Cross Market Low', style=shape.diamond, location=location.abovebar, color=color.new(color.teal, 0), size=size.small)
+plotshape(event_bp_CrossPress and plot_bp_CrossPress, title='BP: Crossover w/Pressure', style=shape.circle, location=location.abovebar, color=color.new(color.orange, 0), size=size.small)
+
+
+// =============================================================================
+// =============================================================================
+// (F) ALERTS
+// =============================================================================
+// =============================================================================
+
+// =============================================================================
+// (F.1) GLOBAL ALERTS (MULTIPLEXER)
+// =============================================================================
+
+var string alert_message_agg = ""
+
+if alert_master_enable
+    // --- Reset Aggregator ---
+    // Reset only if on the confirmed bar close (gate ensures this).
+    if gate
+        alert_message_agg := ""
+
+    // 2. LSMA Z-Code
+    if event_RB and alert_RB
+        alert_message_agg += "LSMA Regular Bull (RB)\n"
+    if event_HB and alert_HB
+        alert_message_agg += "LSMA Hidden Bull (HB)\n"
+
+    // 3. Boolander
+    if event_res_pb_broken and alert_res_pb_broken
+        alert_message_agg += "Resistance PB Broken\n"
+
+    if event_beluga_buy and alert_beluga_buy
+        alert_message_agg += "Beluga PB Buy\n"
+
+    if event_pbj_buy and alert_pbj_buy
+        alert_message_agg += "Original PB&J Follow-up Buy\n"
+
+    // (D) Zoolander Any-Selected.
+    if event_zoolander_any_selected and alert_zoolander
+        // Use the dynamic flavor string which depends on the Global Plot settings.
+        if zoolander_alert_flavor != ""
+            // Added (Selected) for clarity if specific alerts below are also active.
+            alert_message_agg += zoolander_alert_flavor + " (Selected)\n"
+
+    // --- FIX: Specific Zoolander Alerts (Multiplexer) ---
+    // Added logic for the new specific Zoolander alert toggles.
+    // These use the zoo_bottom_* variables which are already gated internally by f_zoolander_search.
+
+    if zoo_bottom_A and alert_zoolander_a
+        alert_message_agg += "Zoolander Bottom (PB-A)\n"
+
+    if zoo_bottom_B and alert_zoolander_b
+        alert_message_agg += "Zoolander Bottom (PB-B)\n"
+
+    if zoo_bottom_C and alert_zoolander_c
+        alert_message_agg += "Zoolander Bottom (PB-C)\n"
+
+    if zoo_bottom_broken and alert_zoolander_broken
+        alert_message_agg += "Zoolander Bottom (Broken)\n"
+
+    if zoo_bottom_ANY_RAW and alert_zoolander_any_raw
+        alert_message_agg += "Zoolander Bottom (ANY)\n"
+    // --- END FIX ---
+
+    if event_bs_LongWarning and alert_bs_LongWarning
+        alert_message_agg += "BS: Long Entry Warning\n"
+
+    if event_bp_Long and alert_bp_Long
+        alert_message_agg += "BP: Long (Consolidated)\n"
+
+    if event_bp_CrossMkLow and alert_bp_CrossMkLow
+        alert_message_agg += "BP: Cross Market Low\n"
+
+    if event_bp_CrossPress and alert_bp_CrossPress
+        alert_message_agg += "BP: Crossover w/Pressure\n"
+
+    // --- Fire Alert ---
+    // Bar-close only enforced by event_* gating and the internal gating of zoo_bottom_*.
+    if alert_message_agg != ""
+        // Using a generic alert() call for the multiplexer.
+        alert("{{ticker}} Signal Hub Alert @ {{close}}:\n" + alert_message_agg, alert.freq_once_per_bar_close)
+
+// =============================================================================
+// (F.3) DEDICATED ALERTCONDITIONS
+// =============================================================================
+// These allow users to set up individual, static alerts via the TradingView UI.
+
+// 2. LSMA Z-Code
+alertcondition(event_RB, title="HUB: LSMA Regular Bullish (RB)", message="RB confirmed at bar close.")
+alertcondition(event_HB, title="HUB: LSMA Hidden Bullish (HB)", message="HB confirmed at bar close.")
+
+// 3. Boolander
+alertcondition(event_res_pb_broken, title="HUB: Resistance PB Broken", message="Resistance PB Broken")
+alertcondition(event_beluga_buy, title="HUB: Beluga PB Buy", message="Beluga PB Buy")
+alertcondition(event_pbj_buy, title="HUB: Original PB&J Follow-up Buy", message="Original PB&J Follow-up Buy")
+// Static message for the "Any Selected" condition, as alertcondition messages cannot be dynamic.
+alertcondition(event_zoolander_any_selected, title="HUB: Zoolander Bottom (Any Selected)", message="Zoolander Bottom (Any Selected Type)")
+
+// --- FIX: Specific Zoolander Dedicated Alerts ---
+alertcondition(zoo_bottom_A, title="HUB: Zoolander Bottom (PB-A)", message="Zoolander Bottom (PB-A)")
+alertcondition(zoo_bottom_B, title="HUB: Zoolander Bottom (PB-B)", message="Zoolander Bottom (PB-B)")
+alertcondition(zoo_bottom_C, title="HUB: Zoolander Bottom (PB-C)", message="Zoolander Bottom (PB-C)")
+alertcondition(zoo_bottom_broken, title="HUB: Zoolander Bottom (Broken)", message="Zoolander Bottom (Broken)")
+alertcondition(zoo_bottom_ANY_RAW, title="HUB: Zoolander Bottom (ANY)", message="Zoolander Bottom (ANY)")
+// --- END FIX ---
+
+alertcondition(event_bs_LongWarning, title="HUB: BS Long Entry Warning", message="BS: Long Entry Warning")
+alertcondition(event_bp_Long, title="HUB: BP Long (Consolidated)", message="BP: Long (Consolidated)")
+alertcondition(event_bp_CrossMkLow, title="HUB: BP Cross Market Low", message="BP: Cross Market Low")
+alertcondition(event_bp_CrossPress, title="HUB: BP Crossover w/Pressure", message="BP: Crossover w/Pressure")

@@ -1,0 +1,54 @@
+Lego_Factory_Work_Order.txt
+-------------------------------------------------
+
+# === LEGO FACTORY WORK ORDER ===
+#
+# INSTRUCTIONS:
+# 1. Fill out Section A to specify changes to the *current* Lego Farm.
+# 2. Fill out Section B to add *new* Lego Pieces.
+# 3. Fill out Section C only if you have changes to the Custom Signal logic.
+# 4. Paste this completed order and all *new* source code files to me.
+#
+#################################################
+
+
+## A. PRIMARY LEGO FARM (The "Crops")
+# (Mark each Lego you want to change with [REMOVE]. Leave the rest as [KEEP]. If there is no change, then leave the line blank. The current script for "HUB_THIS_SeqDens_11_1031_6am.txt" has. 11 primary signals (aka legos). So, if there are no changes, then you should keep the 11 signals from P1. - P11. Blank. For example, Signal P1 would simply remain as "[KEEP] P1. [Signal Name 1]." 
+
+[KEEP] P1. [Signal Name 1]
+[KEEP] P2. [Signal Name 2]
+[KEEP] P3. [Signal Name 3]
+[KEEP] P4. [Signal Name 4]
+[KEEP] P5. [Signal Name 5]
+[KEEP] P6. [Signal Name 6]
+[KEEP] P7. [Signal Name 7]
+[KEEP] P8. [Signal Name 8]
+[KEEP] P9. [Signal Name 9]
+[KEEP] P10. [Signal Name 10]
+[KEEP] P11. [Signal Name 11]
+
+
+## B. NEW LEGO PIECES (Additions & Replacements)
+# (Fill this out with your new signals)
+
+| Lego Slot | Source Script Name | Signal Name from Script |
+| :--- | :--- | :--- |
+| P11. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "Resistance PB Broken"] |
+| P12. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "Beluga PB Buy"] |
+| P13. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "Original PB&J Follow-up Buy"] |
+| P14. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "Zoolander Bottom (PB-A)"] |
+| P15. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "Zoolander Bottom (PB-B)"] |
+| P16. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "Zoolander Bottom (PB-C)"] |
+| P17. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "Zoolander Bottom (Broken)"] |
+| P18. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "Zoolander Bottom (ANY)"] |
+| P19. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "BP: Crossover w/Pressure"] |
+| P20. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "BS: Long Entry Warning"] |
+| P21. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "BP: Long (Consolidated)"] |
+| P22. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "BP: Cross Market Low"] |
+| P23. | [Boolander_Script_wZOO5typesYellowAnyTriangle.txt] | [e.g., "BP: Crossover w/Pressure"] |
+
+
+## C. 10 CUSTOM LEGO FACTORY (The "Assembly Line")
+# (Mark with [CHANGE] only if you have new logic for all 10 custom signals from A-J. Otherwise, leave as [NO CHANGE] for all 10 custom signals.)
+
+[NO CHANGE] 10 Custom Signals A-J
